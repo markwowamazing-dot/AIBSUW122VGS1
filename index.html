@@ -157,23 +157,33 @@ async function deriveKey(passphrase, salt, iterations){
 }
 
 /* AES-GCM encrypt/decrypt */
+function toBuf(viewOrArr) {
+  if (!viewOrArr) return undefined;
+  if (viewOrArr instanceof Uint8Array) return viewOrArr;
+  if (viewOrArr.buffer instanceof ArrayBuffer) return new Uint8Array(viewOrArr.buffer, viewOrArr.byteOffset||0, viewOrArr.byteLength||viewOrArr.length||undefined);
+  // If someone passed a string by mistake, encode it.
+  if (typeof viewOrArr === "string") return new TextEncoder().encode(viewOrArr);
+  // Last resort: try to construct a Uint8Array
+  return new Uint8Array(viewOrArr);
+}
+
 async function aesgcmEncrypt(key, plaintextBytes, aadBytes){
   const nonce = randBytes(12);
-  const ct = await crypto.subtle.encrypt(
-    {name:"AES-GCM", iv:nonce, additionalData: aadBytes || undefined},
-    key,
-    plaintextBytes
-  );
+  const params = { name: "AES-GCM", iv: nonce };
+  const aad = toBuf(aadBytes);
+  if (aad) params.additionalData = aad; // ONLY set when present (avoid undefined)
+  const ct = await crypto.subtle.encrypt(params, key, toBuf(plaintextBytes));
   return {nonce, ct:new Uint8Array(ct)};
 }
+
 async function aesgcmDecrypt(key, nonce, ciphertextBytes, aadBytes){
-  const pt = await crypto.subtle.decrypt(
-    {name:"AES-GCM", iv:nonce, additionalData: aadBytes || undefined},
-    key,
-    ciphertextBytes
-  );
+  const params = { name: "AES-GCM", iv: toBuf(nonce) };
+  const aad = toBuf(aadBytes);
+  if (aad) params.additionalData = aad; // ONLY set when present (avoid undefined)
+  const pt = await crypto.subtle.decrypt(params, key, toBuf(ciphertextBytes));
   return new Uint8Array(pt);
 }
+
 
 /* File helpers */
 function downloadBytes(bytes, filename){
@@ -252,7 +262,7 @@ encBtn.addEventListener("click", async ()=>{
     if (!pass){ encMsg.innerHTML = '<span class="msg-err">Passphrase is required.</span>'; return; }
 
     const aadStr = encAAD.value.trim();
-    const aadBytes = aadStr ? enc.encode(aadStr) : null;
+    const aadBytes = (aadStr.length > 0) ? enc.encode(aadStr) : undefined;
 
     let inName = "message.txt";
     let ptBytes;
@@ -297,7 +307,7 @@ decBtn.addEventListener("click", async ()=>{
     const f = decFile.files[0];
     if (!f){ decMsg.innerHTML = '<span class="msg-err">No .enc file selected.</span>'; return; }
     const aadStr = decAAD.value.trim();
-    const aadOverride = aadStr ? enc.encode(aadStr) : null;
+    const aadOverride = (aadStr.length > 0) ? enc.encode(aadStr) : undefined;
 
     const envBytes = new Uint8Array(await readFileAsArrayBuffer(f));
     const envStr = new TextDecoder().decode(envBytes);
