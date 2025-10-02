@@ -4,8 +4,6 @@
 <meta charset="utf-8">
 <title>Web Cipher — Client-Only (PBKDF2 + AES-GCM)</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta http-equiv="Cross-Origin-Opener-Policy" content="same-origin">
-<meta http-equiv="Cross-Origin-Embedder-Policy" content="require-corp">
 <style>
 :root{--bg:#0f1115;--panel:#171a21;--muted:#c5c9d3;--text:#e8eaf0;--accent:#3a82f7;--border:#2a2f3a;--ok:#22c55e;--err:#ef4444}
 *{box-sizing:border-box}body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,Cantarell,"Helvetica Neue",Arial,sans-serif;margin:0;background:var(--bg);color:var(--text)}
@@ -113,13 +111,13 @@ button{padding:.7rem 1rem;border:0;border-radius:8px;background:var(--accent);co
 </div>
 
 <script>
-/*** ---- Configuration (set your gate password here) ---- ***/
-const SITE_PASSWORD = "gI5HuKo3PO5o-e@";  // ← replace with your site password
-/*** ----------------------------------------------------- ***/
+/*** ---- Configuration ---- ***/
+const SITE_PASSWORD = "changeme123";  // ← set your site gate password
+const PBKDF2_ITER = 310000;           // reasonable browser default
 
 /* --------- Utilities --------- */
-const enc = new TextEncoder();
-const dec = new TextDecoder();
+const encTxt = new TextEncoder();
+const decTxt = new TextDecoder();
 
 /* Base64url helpers */
 function b64uEncode(buf){
@@ -135,6 +133,17 @@ function b64uDecode(s){
   return out.buffer;
 }
 
+/* Ensure BufferSource */
+function toBuf(x){
+  if (x === undefined || x === null) return undefined;
+  if (x instanceof ArrayBuffer) return new Uint8Array(x);
+  if (ArrayBuffer.isView(x)) return new Uint8Array(x.buffer, x.byteOffset, x.byteLength);
+  if (x instanceof Uint8Array) return x;
+  if (typeof x === "string") return encTxt.encode(x);
+  // If it's a number[] or similar
+  try { return new Uint8Array(x); } catch { return undefined; }
+}
+
 /* Random bytes */
 function randBytes(n){
   const b = new Uint8Array(n);
@@ -145,10 +154,10 @@ function randBytes(n){
 /* PBKDF2-SHA256 → AES-GCM key */
 async function deriveKey(passphrase, salt, iterations){
   const baseKey = await crypto.subtle.importKey(
-    "raw", enc.encode(passphrase), {name:"PBKDF2"}, false, ["deriveBits","deriveKey"]
+    "raw", encTxt.encode(passphrase), {name:"PBKDF2"}, false, ["deriveKey"]
   );
   return crypto.subtle.deriveKey(
-    {name:"PBKDF2", hash:"SHA-256", salt, iterations},
+    {name:"PBKDF2", hash:"SHA-256", salt: toBuf(salt), iterations},
     baseKey,
     {name:"AES-GCM", length:256},
     false,
@@ -156,34 +165,22 @@ async function deriveKey(passphrase, salt, iterations){
   );
 }
 
-/* AES-GCM encrypt/decrypt */
-function toBuf(viewOrArr) {
-  if (!viewOrArr) return undefined;
-  if (viewOrArr instanceof Uint8Array) return viewOrArr;
-  if (viewOrArr.buffer instanceof ArrayBuffer) return new Uint8Array(viewOrArr.buffer, viewOrArr.byteOffset||0, viewOrArr.byteLength||viewOrArr.length||undefined);
-  // If someone passed a string by mistake, encode it.
-  if (typeof viewOrArr === "string") return new TextEncoder().encode(viewOrArr);
-  // Last resort: try to construct a Uint8Array
-  return new Uint8Array(viewOrArr);
-}
-
+/* AES-GCM (ONLY set additionalData when real BufferSource) */
 async function aesgcmEncrypt(key, plaintextBytes, aadBytes){
   const nonce = randBytes(12);
-  const params = { name: "AES-GCM", iv: nonce };
+  const params = { name:"AES-GCM", iv: toBuf(nonce) };
   const aad = toBuf(aadBytes);
-  if (aad) params.additionalData = aad; // ONLY set when present (avoid undefined)
+  if (aad && aad.byteLength > 0) params.additionalData = aad;
   const ct = await crypto.subtle.encrypt(params, key, toBuf(plaintextBytes));
   return {nonce, ct:new Uint8Array(ct)};
 }
-
 async function aesgcmDecrypt(key, nonce, ciphertextBytes, aadBytes){
-  const params = { name: "AES-GCM", iv: toBuf(nonce) };
+  const params = { name:"AES-GCM", iv: toBuf(nonce) };
   const aad = toBuf(aadBytes);
-  if (aad) params.additionalData = aad; // ONLY set when present (avoid undefined)
+  if (aad && aad.byteLength > 0) params.additionalData = aad;
   const pt = await crypto.subtle.decrypt(params, key, toBuf(ciphertextBytes));
   return new Uint8Array(pt);
 }
-
 
 /* File helpers */
 function downloadBytes(bytes, filename){
@@ -192,7 +189,7 @@ function downloadBytes(bytes, filename){
   a.href = URL.createObjectURL(blob);
   a.download = filename;
   a.click();
-  setTimeout(()=>URL.revokeObjectURL(a.href), 1500);
+  setTimeout(()=>URL.revokeObjectURL(a.href), 1200);
 }
 function readFileAsArrayBuffer(file){
   return new Promise((res,rej)=>{
@@ -203,7 +200,7 @@ function readFileAsArrayBuffer(file){
   });
 }
 
-/* ---- Gate (client-only; obfuscation, not server security) ---- */
+/* ---- Gate ---- */
 const gateEl = document.getElementById("gate");
 const appEl  = document.getElementById("app");
 const gateBtn = document.getElementById("gateBtn");
@@ -251,9 +248,6 @@ radios.forEach(r=>r.addEventListener("change", ()=>{
   else { textMode.classList.add("hidden"); fileMode.classList.remove("hidden"); }
 }));
 
-/* Parameters (iterations) — tune if desired */
-const PBKDF2_ITER = 310000; // reasonable modern default for browsers
-
 /* Encrypt handler */
 encBtn.addEventListener("click", async ()=>{
   encMsg.textContent = "";
@@ -261,14 +255,14 @@ encBtn.addEventListener("click", async ()=>{
     const pass = encPass.value;
     if (!pass){ encMsg.innerHTML = '<span class="msg-err">Passphrase is required.</span>'; return; }
 
-    const aadStr = encAAD.value.trim();
-    const aadBytes = (aadStr.length > 0) ? enc.encode(aadStr) : undefined;
+    const aadStr = (encAAD.value || "").trim();
+    const aadBytes = (aadStr.length > 0) ? encTxt.encode(aadStr) : undefined;
 
     let inName = "message.txt";
     let ptBytes;
     const mode = document.querySelector('input[name="inmode"]:checked').value;
     if (mode==="text"){
-      ptBytes = enc.encode(encText.value || "");
+      ptBytes = encTxt.encode(encText.value || "");
     } else {
       const f = encFile.files[0];
       if (!f){ encMsg.innerHTML = '<span class="msg-err">No file selected.</span>'; return; }
@@ -280,7 +274,6 @@ encBtn.addEventListener("click", async ()=>{
     const key  = await deriveKey(pass, salt, PBKDF2_ITER);
     const {nonce, ct} = await aesgcmEncrypt(key, ptBytes, aadBytes);
 
-    /* Build compact JSON envelope (UTF-8 bytes) */
     const envObj = {
       v:1,
       t:"pskpbkdf2",
@@ -289,6 +282,7 @@ encBtn.addEventListener("click", async ()=>{
       ct:b64uEncode(ct)
     };
     if (aadBytes) envObj.aad = b64uEncode(aadBytes);
+
     const envStr = JSON.stringify(envObj);
     const outName = (inName.replace(/\.[^.]+$/,"") || "message") + ".enc";
     downloadBytes(new TextEncoder().encode(envStr), outName);
@@ -306,8 +300,8 @@ decBtn.addEventListener("click", async ()=>{
     if (!pass){ decMsg.innerHTML = '<span class="msg-err">Passphrase is required.</span>'; return; }
     const f = decFile.files[0];
     if (!f){ decMsg.innerHTML = '<span class="msg-err">No .enc file selected.</span>'; return; }
-    const aadStr = decAAD.value.trim();
-    const aadOverride = (aadStr.length > 0) ? enc.encode(aadStr) : undefined;
+    const aadStr = (decAAD.value || "").trim();
+    const aadOverride = (aadStr.length > 0) ? encTxt.encode(aadStr) : undefined;
 
     const envBytes = new Uint8Array(await readFileAsArrayBuffer(f));
     const envStr = new TextDecoder().decode(envBytes);
@@ -320,12 +314,11 @@ decBtn.addEventListener("click", async ()=>{
     const iters = Number(env.kdf?.i||PBKDF2_ITER) || PBKDF2_ITER;
     const nonce = new Uint8Array(b64uDecode(env.nonce||""));
     const ct    = new Uint8Array(b64uDecode(env.ct||""));
-    const aad   = (aadOverride!==null) ? aadOverride : (env.aad ? new Uint8Array(b64uDecode(env.aad)) : null);
+    const aad   = (aadOverride!==undefined) ? aadOverride : (env.aad ? new Uint8Array(b64uDecode(env.aad)) : undefined);
 
     const key = await deriveKey(pass, salt, iters);
-    const pt  = await aesgcmDecrypt(key, nonce, ct, aad||undefined);
+    const pt  = await aesgcmDecrypt(key, nonce, ct, aad);
 
-    /* Try show as UTF-8 text; else download as binary */
     let textOk = false, preview = "";
     try { preview = new TextDecoder().decode(pt); textOk = true; } catch{}
     if (textOk){
