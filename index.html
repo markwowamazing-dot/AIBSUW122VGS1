@@ -1,0 +1,337 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Web Cipher — Client-Only (PBKDF2 + AES-GCM)</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Cross-Origin-Opener-Policy" content="same-origin">
+<meta http-equiv="Cross-Origin-Embedder-Policy" content="require-corp">
+<style>
+:root{--bg:#0f1115;--panel:#171a21;--muted:#c5c9d3;--text:#e8eaf0;--accent:#3a82f7;--border:#2a2f3a;--ok:#22c55e;--err:#ef4444}
+*{box-sizing:border-box}body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,Cantarell,"Helvetica Neue",Arial,sans-serif;margin:0;background:var(--bg);color:var(--text)}
+.container{max-width:1000px;margin:2rem auto;padding:0 1rem}
+.card{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:1rem 1.25rem;margin:1rem 0}
+h1{font-size:1.4rem;margin:.2rem 0 .6rem} h2{font-size:1.1rem;margin:.2rem 0 .8rem;color:var(--muted)}
+label{display:block;margin:.65rem 0 .25rem;color:var(--muted)}
+input[type=text],input[type=password],textarea{width:100%;padding:.75rem;border-radius:8px;border:1px solid var(--border);background:#0f1218;color:var(--text)}
+textarea{min-height:120px;resize:vertical}
+.row{display:grid;grid-template-columns:1fr 1fr;gap:1rem}
+button{padding:.7rem 1rem;border:0;border-radius:8px;background:var(--accent);color:white;font-weight:600;cursor:pointer}
+.small{font-size:.9rem;color:var(--muted)}
+.badge{display:inline-block;padding:.2rem .5rem;border-radius:6px;background:#0f1218;border:1px solid var(--border);color:var(--muted);font-size:.8rem}
+.msg-ok{color:var(--ok)} .msg-err{color:var(--err)}
+.toggle{display:flex;gap:.5rem;align-items:center;margin:.5rem 0}
+.hidden{display:none}
+.center{max-width:560px;margin:6rem auto;padding:2rem}
+</style>
+</head>
+<body>
+<div id="gate" class="center card">
+  <h1>Enter Site Password</h1>
+  <label>Password</label>
+  <input id="gatePw" type="password" autocomplete="current-password" autofocus>
+  <div style="margin-top:.75rem"><button id="gateBtn">Unlock</button></div>
+  <div id="gateErr" class="msg-err small hidden" style="margin-top:.6rem">Incorrect password.</div>
+  <div class="small" style="margin-top:.6rem">Set your password in the code (const <code>SITE_PASSWORD</code>).</div>
+</div>
+
+<div id="app" class="container hidden">
+  <div class="card">
+    <h1>Web Cipher (Client-Only)</h1>
+    <div class="small">PBKDF2-SHA256 → AES-256-GCM. Nothing uploaded; all crypto runs in your browser.</div>
+  </div>
+
+  <div class="card">
+    <span class="badge">Encrypt</span>
+    <div class="row">
+      <div>
+        <label>Passphrase</label>
+        <input id="encPass" type="password" placeholder="Passphrase used for key derivation">
+      </div>
+      <div>
+        <label>Optional AAD (bind context)</label>
+        <input id="encAAD" type="text" placeholder="e.g., filename or purpose tag">
+      </div>
+    </div>
+
+    <div class="toggle">
+      <label><input type="radio" name="inmode" value="text" checked> Enter text</label>
+      <label><input type="radio" name="inmode" value="file"> Upload file</label>
+    </div>
+
+    <div id="textMode">
+      <label>Plaintext</label>
+      <textarea id="encText" placeholder="Type or paste your message here"></textarea>
+    </div>
+
+    <div id="fileMode" class="hidden">
+      <label>Input file</label>
+      <input id="encFile" type="file" accept="*/*">
+    </div>
+
+    <div style="margin-top:.75rem">
+      <button id="encBtn">Encrypt → Download .enc</button>
+    </div>
+    <div id="encMsg" class="small" style="margin-top:.65rem"></div>
+  </div>
+
+  <div class="card">
+    <span class="badge">Decrypt</span>
+    <div class="row">
+      <div>
+        <label>Passphrase</label>
+        <input id="decPass" type="password" placeholder="Same passphrase used to encrypt">
+      </div>
+      <div>
+        <label>Optional AAD (must match if set on encrypt)</label>
+        <input id="decAAD" type="text" placeholder="Same AAD (if any)">
+      </div>
+    </div>
+
+    <label>.enc file</label>
+    <input id="decFile" type="file" accept=".enc,application/octet-stream">
+
+    <div style="margin-top:.75rem">
+      <button id="decBtn">Decrypt</button>
+    </div>
+
+    <div id="decMsg" class="small" style="margin-top:.65rem"></div>
+
+    <div id="decPreviewWrap" class="hidden" style="margin-top:1rem">
+      <div class="small">Decrypted text preview:</div>
+      <textarea id="decPreview" readonly></textarea>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Format</h2>
+    <div class="small">
+      Envelope JSON (UTF-8) with url-safe Base64 fields:<br>
+      <code>{"v":1,"t":"pskpbkdf2","kdf":{"name":"PBKDF2","i":ITER,"salt":"..."},"nonce":"...","ct":"...", "aad":"..."?}</code>
+    </div>
+  </div>
+</div>
+
+<script>
+/*** ---- Configuration (set your gate password here) ---- ***/
+const SITE_PASSWORD = "changeme123";  // ← replace with your site password
+/*** ----------------------------------------------------- ***/
+
+/* --------- Utilities --------- */
+const enc = new TextEncoder();
+const dec = new TextDecoder();
+
+/* Base64url helpers */
+function b64uEncode(buf){
+  const b64 = btoa(String.fromCharCode(...new Uint8Array(buf)));
+  return b64.replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');
+}
+function b64uDecode(s){
+  s = s.replace(/-/g,'+').replace(/_/g,'/');
+  const pad = "=".repeat((4 - (s.length % 4)) % 4);
+  const binStr = atob(s + pad);
+  const out = new Uint8Array(binStr.length);
+  for (let i=0; i<binStr.length; i++) out[i] = binStr.charCodeAt(i);
+  return out.buffer;
+}
+
+/* Random bytes */
+function randBytes(n){
+  const b = new Uint8Array(n);
+  crypto.getRandomValues(b);
+  return b;
+}
+
+/* PBKDF2-SHA256 → AES-GCM key */
+async function deriveKey(passphrase, salt, iterations){
+  const baseKey = await crypto.subtle.importKey(
+    "raw", enc.encode(passphrase), {name:"PBKDF2"}, false, ["deriveBits","deriveKey"]
+  );
+  return crypto.subtle.deriveKey(
+    {name:"PBKDF2", hash:"SHA-256", salt, iterations},
+    baseKey,
+    {name:"AES-GCM", length:256},
+    false,
+    ["encrypt","decrypt"]
+  );
+}
+
+/* AES-GCM encrypt/decrypt */
+async function aesgcmEncrypt(key, plaintextBytes, aadBytes){
+  const nonce = randBytes(12);
+  const ct = await crypto.subtle.encrypt(
+    {name:"AES-GCM", iv:nonce, additionalData: aadBytes || undefined},
+    key,
+    plaintextBytes
+  );
+  return {nonce, ct:new Uint8Array(ct)};
+}
+async function aesgcmDecrypt(key, nonce, ciphertextBytes, aadBytes){
+  const pt = await crypto.subtle.decrypt(
+    {name:"AES-GCM", iv:nonce, additionalData: aadBytes || undefined},
+    key,
+    ciphertextBytes
+  );
+  return new Uint8Array(pt);
+}
+
+/* File helpers */
+function downloadBytes(bytes, filename){
+  const blob = new Blob([bytes], {type:"application/octet-stream"});
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = filename;
+  a.click();
+  setTimeout(()=>URL.revokeObjectURL(a.href), 1500);
+}
+function readFileAsArrayBuffer(file){
+  return new Promise((res,rej)=>{
+    const fr = new FileReader();
+    fr.onload = ()=>res(fr.result);
+    fr.onerror = rej;
+    fr.readAsArrayBuffer(file);
+  });
+}
+
+/* ---- Gate (client-only; obfuscation, not server security) ---- */
+const gateEl = document.getElementById("gate");
+const appEl  = document.getElementById("app");
+const gateBtn = document.getElementById("gateBtn");
+const gatePw  = document.getElementById("gatePw");
+const gateErr = document.getElementById("gateErr");
+gateBtn.addEventListener("click", ()=>{
+  if (gatePw.value === SITE_PASSWORD){
+    gateEl.classList.add("hidden");
+    appEl.classList.remove("hidden");
+    localStorage.setItem("wc_gate","ok");
+  } else {
+    gateErr.classList.remove("hidden");
+  }
+});
+window.addEventListener("DOMContentLoaded", ()=>{
+  if (localStorage.getItem("wc_gate")==="ok"){
+    gateEl.classList.add("hidden");
+    appEl.classList.remove("hidden");
+  }
+});
+
+/* ---- UI wiring ---- */
+const encPass = document.getElementById("encPass");
+const encAAD  = document.getElementById("encAAD");
+const encText = document.getElementById("encText");
+const encFile = document.getElementById("encFile");
+const encBtn  = document.getElementById("encBtn");
+const encMsg  = document.getElementById("encMsg");
+
+const decPass = document.getElementById("decPass");
+const decAAD  = document.getElementById("decAAD");
+const decFile = document.getElementById("decFile");
+const decBtn  = document.getElementById("decBtn");
+const decMsg  = document.getElementById("decMsg");
+const decPrevWrap = document.getElementById("decPreviewWrap");
+const decPreview  = document.getElementById("decPreview");
+
+/* input mode toggle */
+const radios = document.querySelectorAll('input[name="inmode"]');
+const textMode = document.getElementById("textMode");
+const fileMode = document.getElementById("fileMode");
+radios.forEach(r=>r.addEventListener("change", ()=>{
+  const mode = document.querySelector('input[name="inmode"]:checked').value;
+  if (mode==="text"){ textMode.classList.remove("hidden"); fileMode.classList.add("hidden"); }
+  else { textMode.classList.add("hidden"); fileMode.classList.remove("hidden"); }
+}));
+
+/* Parameters (iterations) — tune if desired */
+const PBKDF2_ITER = 310000; // reasonable modern default for browsers
+
+/* Encrypt handler */
+encBtn.addEventListener("click", async ()=>{
+  encMsg.textContent = "";
+  try{
+    const pass = encPass.value;
+    if (!pass){ encMsg.innerHTML = '<span class="msg-err">Passphrase is required.</span>'; return; }
+
+    const aadStr = encAAD.value.trim();
+    const aadBytes = aadStr ? enc.encode(aadStr) : null;
+
+    let inName = "message.txt";
+    let ptBytes;
+    const mode = document.querySelector('input[name="inmode"]:checked').value;
+    if (mode==="text"){
+      ptBytes = enc.encode(encText.value || "");
+    } else {
+      const f = encFile.files[0];
+      if (!f){ encMsg.innerHTML = '<span class="msg-err">No file selected.</span>'; return; }
+      ptBytes = new Uint8Array(await readFileAsArrayBuffer(f));
+      inName = f.name;
+    }
+
+    const salt = randBytes(16);
+    const key  = await deriveKey(pass, salt, PBKDF2_ITER);
+    const {nonce, ct} = await aesgcmEncrypt(key, ptBytes, aadBytes);
+
+    /* Build compact JSON envelope (UTF-8 bytes) */
+    const envObj = {
+      v:1,
+      t:"pskpbkdf2",
+      kdf:{name:"PBKDF2", i:PBKDF2_ITER, salt:b64uEncode(salt)},
+      nonce:b64uEncode(nonce),
+      ct:b64uEncode(ct)
+    };
+    if (aadBytes) envObj.aad = b64uEncode(aadBytes);
+    const envStr = JSON.stringify(envObj);
+    const outName = (inName.replace(/\.[^.]+$/,"") || "message") + ".enc";
+    downloadBytes(new TextEncoder().encode(envStr), outName);
+    encMsg.innerHTML = '<span class="msg-ok">Encrypted. Downloaded <code>'+outName+'</code>.</span>';
+  }catch(e){
+    encMsg.innerHTML = '<span class="msg-err">Encrypt error: '+(e?.message||e)+'</span>';
+  }
+});
+
+/* Decrypt handler */
+decBtn.addEventListener("click", async ()=>{
+  decMsg.textContent = ""; decPrevWrap.classList.add("hidden"); decPreview.value = "";
+  try{
+    const pass = decPass.value;
+    if (!pass){ decMsg.innerHTML = '<span class="msg-err">Passphrase is required.</span>'; return; }
+    const f = decFile.files[0];
+    if (!f){ decMsg.innerHTML = '<span class="msg-err">No .enc file selected.</span>'; return; }
+    const aadStr = decAAD.value.trim();
+    const aadOverride = aadStr ? enc.encode(aadStr) : null;
+
+    const envBytes = new Uint8Array(await readFileAsArrayBuffer(f));
+    const envStr = new TextDecoder().decode(envBytes);
+    let env;
+    try { env = JSON.parse(envStr); }
+    catch{ decMsg.innerHTML = '<span class="msg-err">Invalid envelope JSON.</span>'; return; }
+
+    if (env.t!=="pskpbkdf2" || env.v!==1){ decMsg.innerHTML = '<span class="msg-err">Unsupported envelope.</span>'; return; }
+    const salt  = new Uint8Array(b64uDecode(env.kdf?.salt||""));
+    const iters = Number(env.kdf?.i||PBKDF2_ITER) || PBKDF2_ITER;
+    const nonce = new Uint8Array(b64uDecode(env.nonce||""));
+    const ct    = new Uint8Array(b64uDecode(env.ct||""));
+    const aad   = (aadOverride!==null) ? aadOverride : (env.aad ? new Uint8Array(b64uDecode(env.aad)) : null);
+
+    const key = await deriveKey(pass, salt, iters);
+    const pt  = await aesgcmDecrypt(key, nonce, ct, aad||undefined);
+
+    /* Try show as UTF-8 text; else download as binary */
+    let textOk = false, preview = "";
+    try { preview = new TextDecoder().decode(pt); textOk = true; } catch{}
+    if (textOk){
+      decPrevWrap.classList.remove("hidden");
+      decPreview.value = preview;
+      decMsg.innerHTML = '<span class="msg-ok">Decrypted text shown below.</span>';
+    } else {
+      const base = f.name.replace(/\.enc$/i,"");
+      const outName = (base || "message") + ".dec.bin";
+      downloadBytes(pt, outName);
+      decMsg.innerHTML = '<span class="msg-ok">Decrypted binary downloaded as <code>'+outName+'</code>.</span>';
+    }
+  }catch(e){
+    decMsg.innerHTML = '<span class="msg-err">Decrypt error: '+(e?.message||e)+'</span>';
+  }
+});
+</script>
+</body>
+</html>
