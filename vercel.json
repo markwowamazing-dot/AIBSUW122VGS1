@@ -1,0 +1,10 @@
+{
+  "functions": {
+    "api/web_cipher.py": {
+      "runtime": "python3.11"
+    }
+  },
+  "routes": [
+    { "src": "/(.*)", "dest": "/api/web_cipher.py" }
+  ]
+}
